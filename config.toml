@@ -1,0 +1,91 @@
+[plugin]
+enabled = true
+no_symbol_emotion = true
+auto_enable_models = true
+config_version = "0.18.0"
+
+[owner]
+qq = []
+
+[storage]
+model_dir = ""
+
+[groups]
+
+[merge]
+model_a = ""
+model_b = ""
+new_name = ""
+trigger = false
+ratio_a = 50
+dedup_level = "标准"
+max_total_statements = 0
+scene_merge_threshold = 0.8
+snapshot_merge_threshold = 0.55
+
+[compact]
+model = ""
+new_name = ""
+trigger = false
+dedup_level = "标准"
+max_total_statements = 0
+scene_merge_threshold = 0.8
+snapshot_merge_threshold = 0.55
+
+[user_block]
+qq = []
+skip_self_messages = true
+self_qq = []
+block_slash = true
+block_qq_bots = true
+bot_ids = []
+
+[collection]
+auto_analyze_count = 100
+daily_time = ""
+max_messages = 300
+max_stored_messages = 500
+window_size = 60
+backfill_count = 300
+backfill_batch_size = 50
+trigger_analyze_now = false
+trigger_backfill_now = false
+
+[analysis]
+model = ""
+notify_qq = ""
+max_statements_per_scene = 30
+analyze_concurrency = 2
+progress_interval_seconds = 120.0
+
+[blacklist]
+similarity_threshold = 0.85
+items = []
+
+[phrase_blacklist]
+items = []
+
+[inject]
+enabled = true
+enable_style_matching = true
+global_models = []
+max_chars = 2500
+rewrite_model = ""
+rewrite_strength = 30
+rewrite_style = "无"
+rewrite_style_custom = ""
+rewrite_timeout_seconds = 60.0
+hook_timeout_seconds = 60.0
+block_emoji = false
+
+[garbage_guard]
+enabled = true
+retry_on_detect = true
+custom_patterns = []
+
+[pre_rewrite_blacklist]
+enabled = false
+items = []
+semantic_match = false
+rewrite_style = "无"
+rewrite_style_custom = ""

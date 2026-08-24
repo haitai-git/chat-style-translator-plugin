@@ -28,7 +28,6 @@
     "api.call",
     "llm.generate",
     "llm.embed",
-    "config.get",
     "chat.get_all_streams"
   ],
   "i18n": {

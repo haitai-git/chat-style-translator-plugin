@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import re
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("chat_style_translator.analyzer")
@@ -25,6 +26,8 @@ SNAPSHOT_MERGE_SIMILARITY = 0.55
 
 # 单模型精简：激进精简时，场景内字符二元组相似度达到该阈值的近似句合并为一条
 STATEMENT_MERGE_SIMILARITY = 0.8
+
+_MAX_EXAMPLE_CONTEXT = 240
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
@@ -115,7 +118,33 @@ class StyleAnalyzer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_transcript(messages: List[Dict[str, Any]]) -> str:
+    def with_reply_contexts(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按同群已收录消息的明确引用关系补齐前文。"""
+
+        by_id: Dict[str, Dict[str, Any]] = {}
+        prepared = []
+        for message in messages:
+            quoted_id = str(message.get("reply_to_message_id") or "").strip()
+            quoted = by_id.get(quoted_id)
+            if quoted is not None:
+                context = str(quoted.get("text") or "").strip()[:_MAX_EXAMPLE_CONTEXT]
+                prepared.append({
+                    **message,
+                    "quoted_context": context,
+                    "reply_to_id": quoted.get("sender_id") or message.get("reply_to_id"),
+                    "reply_to_name": quoted.get("sender_name") or message.get("reply_to_name"),
+                })
+            else:
+                prepared.append(message)
+            message_id = str(message.get("id") or "").strip()
+            if message_id:
+                by_id.setdefault(message_id, message)
+        return prepared
+
+    @staticmethod
+    def build_transcript(
+        messages: List[Dict[str, Any]], aliases: Optional[Dict[str, str]] = None
+    ) -> str:
         """把收集的消息拼成适合 LLM 阅读的对话转写文本。"""
 
         lines = []
@@ -125,9 +154,18 @@ class StyleAnalyzer:
             if not text:
                 continue
             target = str(message.get("at_user_name") or message.get("reply_to_name") or "").strip()
-            prefix = f"{index}. {name}"
+            alias = (aliases or {}).get(str(message.get("sender_id") or "").strip())
+            speaker = f"{name}（{alias}）" if alias else name
+            prefix = f"{index}. {speaker}"
             if target:
+                target_id = str(message.get("at_user_id") or message.get("reply_to_id") or "").strip()
+                target_alias = (aliases or {}).get(target_id)
                 prefix += f" 对「{target}」说"
+                if target_alias:
+                    prefix += f"（对象 {target_alias}）"
+            quoted_context = message.get("quoted_context")
+            if quoted_context:
+                prefix += f"，引用前文「{quoted_context}」"
             lines.append(f"{prefix}: {text}")
         return "\n".join(lines)
 
@@ -141,18 +179,21 @@ class StyleAnalyzer:
             "请完成以下分析：\n"
             "1. 判断群友们正在聊什么，涉及哪些场景（比如打招呼、闲聊、吐槽、提问求助、表情包互斗等），场景可以多个；\n"
             "2. 分析每一句话是跟谁说的（对群全体说、对某个人说）；\n"
-            "3. 分析每位活跃群友个人的聊天风格（用词习惯、语气、长度、情绪、口头禅），"
+            "3. 按说话人后括号内的 U 编号区分群友。user_id 和 speaker 填该编号，编号缺失时留空。"
+            "分析每位活跃群友的用词、语气、句长、情绪和口头禅，"
             "并给出他的默认性格（性格底色、情绪倾向、与人相处的惯用方式）；\n"
-            "4. 在每个场景下挑选最具代表性的原话作为语句，并注明说话人、说话对象、这句话在这个场景下的含义；\n"
-            "5. 对整体群聊风格做总结。\n\n"
+            "4. 在每个场景挑选最具代表性的原话，注明说话人、说话对象和含义。"
+            "source_line 填这句原话对应的序号，优先挑选有明确引用前文、能体现接话方式的语句。\n"
+            "5. 总结能从样本观察到的群聊表达方式，如口语词、句长、断句、语气词、标点和直接程度。"
+            "overall_style、成员 style 和场景 style 只描述实际观察，不写接话步骤或可直接复制的答复。\n\n"
              "只输出 JSON，不要输出任何其他内容。JSON 结构：\n"
              "{\n"            '  "overall_style": "整体聊天风格总结",\n'
-            '  "members": [{"user_id": "QQ号（必须与对话记录一致）", "name": "昵称", "style": "个人聊天风格描述",\n'
+            '  "members": [{"user_id": "U1（取说话人编号）", "name": "昵称", "style": "个人聊天风格描述",\n'
             '     "personality": "默认性格（性格底色、情绪倾向、相处方式）", "speaking_traits": ["特点1", "特点2"]}],\n'
             '  "scenes": [\n'
             '    {"name": "场景名", "description": "场景描述", "style": "该场景下的说话风格",\n'
             '     "note": "场景备注：这个场景在聊什么、什么语境下出现、群友们一般怎么参与",\n'
-            '     "statements": [{"text": "原话", "speaker": "QQ号", "speaker_name": "昵称", "target": "说话对象或\\"大家\\"",\n'
+            '     "statements": [{"text": "原话", "source_line": 1, "speaker": "U1", "speaker_name": "昵称", "target": "说话对象或\\"大家\\"",\n'
             '       "meaning": "备注：这句话在这个场景下的意思（人怎么看懂这句话）",\n'
             '       "ai_note": "AI理解：AI 在回复时应当如何理解这句话（语气、言外之意、适合怎么用）",\n'
             '       "tags": ["标签"]}]}\n'
@@ -166,7 +207,16 @@ class StyleAnalyzer:
     async def analyze_window(self, messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """分析一段对话窗口，返回一个部分模型（场景/成员/语句）。"""
 
-        transcript = self.build_transcript(messages)
+        aliases: Dict[str, str] = {}
+        ids_by_name: Dict[str, set[str]] = {}
+        for message in messages:
+            sender_id = str(message.get("sender_id") or "").strip()
+            if sender_id:
+                aliases.setdefault(sender_id, f"U{len(aliases) + 1}")
+                name = str(message.get("sender_name") or "").strip()
+                if name:
+                    ids_by_name.setdefault(name, set()).add(sender_id)
+        transcript = self.build_transcript(messages, aliases)
         if not transcript.strip():
             return None
         prompt = (
@@ -183,6 +233,49 @@ class StyleAnalyzer:
         parsed.setdefault("overall_style", "")
         parsed.setdefault("members", [])
         parsed.setdefault("scenes", [])
+        real_id_by_alias = {alias: sender_id for sender_id, alias in aliases.items()}
+        for member in parsed["members"] or []:
+            if not isinstance(member, dict):
+                continue
+            claimed = str(member.get("user_id") or "").strip()
+            name = str(member.get("name") or "").strip()
+            possible_ids = ids_by_name.get(name, set())
+            sender_id = real_id_by_alias.get(claimed)
+            if sender_id and possible_ids and sender_id not in possible_ids:
+                sender_id = None
+            if not sender_id and len(possible_ids) == 1:
+                sender_id = next(iter(possible_ids))
+            member["user_id"] = sender_id or ""
+        by_text: Dict[str, List[Dict[str, Any]]] = {}
+        for message in messages:
+            by_text.setdefault(str(message.get("text") or "").strip(), []).append(message)
+        for scene in parsed["scenes"] or []:
+            if not isinstance(scene, dict):
+                continue
+            for statement in scene.get("statements") or []:
+                if not isinstance(statement, dict):
+                    continue
+                statement.pop("context", None)
+                line = statement.pop("source_line", None)
+                text = str(statement.get("text") or "").strip()
+                source = None
+                if type(line) is int and 1 <= line <= len(messages):
+                    candidate = messages[line - 1]
+                    if str(candidate.get("text") or "").strip() == text:
+                        source = candidate
+                if source is None and len(by_text.get(text, [])) == 1:
+                    source = by_text[text][0]
+                if source is not None:
+                    statement["speaker"] = str(source.get("sender_id") or "").strip()
+                    statement["speaker_name"] = str(source.get("sender_name") or "").strip() or "未知"
+                    target = source.get("at_user_name") or source.get("reply_to_name")
+                    if target:
+                        statement["target"] = str(target).strip()
+                    if source.get("quoted_context"):
+                        statement["context"] = source["quoted_context"]
+                else:
+                    alias = str(statement.get("speaker") or "").strip()
+                    statement["speaker"] = real_id_by_alias.get(alias, "")
         return parsed
 
     # ------------------------------------------------------------------
@@ -212,7 +305,7 @@ class StyleAnalyzer:
             "哪个时段或批次，都不能因为来源/时段不同而分开保留），场景名取更贴切的，"
             "风格描述取综合描述，note 备注取更完整的；",
             "整体风格（overall_style）不合并：overall_style 输出空字符串，系统会分别保留各来源的整体风格，"
-            "你不需要总结或合并整体风格；",
+            "以原有快照记录各来源的表达差异；",
         ]
         if dedup_level == "不去重":
             rules.append("语句不去重：两个来源的语句都保留，即使完全重复也不删除；")
@@ -226,19 +319,25 @@ class StyleAnalyzer:
                 "语句要去重：完全重复或含义高度相似的语句只保留一条，可以保留更完整的那句；"
                 "语句的 speaker 必须使用真实 QQ 号（user_id）；"
             )
-        if ratio is not None and len(ratio) == 2:
+        rules.append("额外输出 style_summary，用一段自然、简短的话归纳各来源反复出现的口语用词、句式节奏、语气和标点习惯。语气随对话轻松或认真而变化时，写清何时收敛，不硬拼不同群的口头禅，不写接话步骤或固定话术。各来源快照由程序保存。")
+        if ratio is not None and len(ratio) == 2 and dedup_level != "不去重":
             ratio_a, ratio_b = int(ratio[0]), int(ratio[1])
             rules.append(
                 f"融合比例（仅两个来源时生效）：当两个来源出现含义相同或高度相似的重复语句时，只保留一条，"
-                f"并按 来源A:来源B = {ratio_a}:{ratio_b} 的比例决定保留哪一方的表述；"
-                "请尽量按此比例均衡分配，不要全部偏向一边；"
+                f"并按 来源A:来源B = {ratio_a}:{ratio_b} 的比例决定保留哪一方的表述。"
+                "某一方为 0 时，重复项统一采用另一方的表述；仅在一方出现的独有内容仍应保留。"
             )
         rules.append(
             "只有场景本身确实不同时，才允许不同场景保留意思相近的语句（在 meaning 里说明各自场景差异）；"
             "场景内容相似或重复的必须合并为一个，不能因为来源或时段不同而分开保留；"
         )
+        rules.append("融合时保留原话及其 context（被引用的前文）。前文和原话成对保留，"
+                     "缺少前文时留空，相同说法对应不同场合时保留有区别的用法。")
         rules.append("融合时保留每条语句的 meaning（这句话的意思）与 ai_note（AI 理解），含义不清时补全；")
-        rules.append(f"每个场景最终保留不超过 {self._max_statements_per_scene} 条最有代表性的语句；")
+        if options.get("analysis_scene_limit"):
+            rules.append(f"每个场景最终保留不超过 {self._max_statements_per_scene} 条最有代表性的语句；")
+        elif max_total <= 0:
+            rules.append("无需控制语句数量。每个场景保留所有独立有效的原始范例及其前文。")
         if max_total > 0:
             rules.append(
                 f"整个模型所有场景合计的语句总数不超过 {max_total} 条；"
@@ -249,10 +348,10 @@ class StyleAnalyzer:
             "你负责把多份「群聊风格分析结果」融合成一份完整模型。规则：\n"
             f"{numbered_rules}"
             "只输出 JSON，不要输出任何其他内容。输出结构与输入结构一致：\n"
-            "{\"overall_style\": \"\", \"members\": [{\"user_id\": \"\", \"name\": \"\", \"style\": \"\", "
+            "{\"overall_style\": \"\", \"style_summary\": \"\", \"members\": [{\"user_id\": \"\", \"name\": \"\", \"style\": \"\", "
             "\"personality\": \"\", \"speaking_traits\": []}], "
             "\"scenes\": [{\"name\": \"\", \"description\": \"\", \"style\": \"\", \"note\": \"\", "
-            "\"statements\": [{\"text\": \"\", \"speaker\": \"\", \"speaker_name\": \"\", \"target\": \"\", \"meaning\": \"\", \"ai_note\": \"\", \"tags\": []}]}]}"
+            "\"statements\": [{\"text\": \"\", \"context\": \"\", \"speaker\": \"\", \"speaker_name\": \"\", \"target\": \"\", \"meaning\": \"\", \"ai_note\": \"\", \"tags\": []}]}]}"
             "\n最后强调：不要输出思考过程、解释或任何多余文字，直接从 { 开始输出完整 JSON，一次性输出，不要截断。"
         )
 
@@ -277,13 +376,23 @@ class StyleAnalyzer:
 
         if not partials:
             return None
+        options = options or {}
+        max_total = int(options.get("max_total_statements") or 0)
+        deduplicate = options.get("dedup_level") != "不去重"
         snapshots = self._collect_style_snapshots(partials)
         scene_threshold = float((options or {}).get("scene_merge_threshold") or SCENE_MERGE_SIMILARITY)
         snapshot_threshold = float((options or {}).get("snapshot_merge_threshold") or SNAPSHOT_MERGE_SIMILARITY)
         if len(partials) == 1:
             merged = json.loads(json.dumps(partials[0]))
         else:
-            payload = json.dumps(partials, ensure_ascii=False, indent=2)
+            prompt_partials = [
+                {key: value for key, value in partial.items() if key != "style_snapshots"}
+                if partial.get("style_summary") else partial
+                for partial in partials
+            ]
+            if deduplicate:
+                prompt_partials = self._remove_repeated_fusion_inputs(prompt_partials)
+            payload = json.dumps(prompt_partials, ensure_ascii=False, separators=(",", ":"))
             prompt = (
                 f"以下是需要融合的 {len(partials)} 份群聊风格分析结果：\n{payload}\n\n"
                 "请按系统要求输出融合后的 JSON。"
@@ -316,19 +425,170 @@ class StyleAnalyzer:
             merged["style_snapshots"] = [str(merged.get("overall_style") or "").strip()]
         merged["name"] = name or "群聊风格模型"
         normalized = self._normalize_model(merged)
+        self._restore_example_contexts(normalized, partials)
         # 相似的场景合并为一个（方便 AI 按场景直接检索），跨度大的场景错开保留
-        normalized["scenes"] = self._merge_similar_scenes(normalized.get("scenes") or [], threshold=scene_threshold)
+        normalized["scenes"] = self._merge_similar_scenes(
+            normalized.get("scenes") or [],
+            threshold=scene_threshold,
+            deduplicate=deduplicate,
+            preserve_speakers=True,
+        )
+        if max_total > 0:
+            normalized["scenes"], _ = self._cap_total_statements(normalized["scenes"], max_total)
+        elif len(partials) > 1 and not options.get("analysis_scene_limit"):
+            self._restore_unlimited_examples(
+                normalized["scenes"], partials, threshold=scene_threshold, deduplicate=deduplicate
+            )
         # 整体风格快照同样按相似度合并，差异大的错开放
         normalized["style_snapshots"] = self._merge_similar_snapshots(
             normalized.get("style_snapshots") or [], threshold=snapshot_threshold
         )
         return normalized
 
+    @classmethod
+    def _restore_unlimited_examples(
+        cls,
+        merged_scenes: List[Dict[str, Any]],
+        partials: List[Dict[str, Any]],
+        *,
+        threshold: float,
+        deduplicate: bool,
+    ) -> None:
+        sources = cls._normalize_model({
+            "scenes": [scene for partial in partials for scene in (partial.get("scenes") or [])]
+        })["scenes"]
+        verified_meanings = {
+            (cls._fusion_statement_key(item), cls._fusion_statement_key(item, "meaning"))
+            for scene in sources for item in scene["statements"] if item.get("meaning")
+        }
+        by_name = {cls._normalize_key(scene["name"]): scene for scene in merged_scenes}
+        inventories = {}
+        for scene in sources:
+            key = cls._normalize_key(scene["name"])
+            target = by_name.get(key)
+            if target is None:
+                target = next(
+                    (item for item in merged_scenes if cls._scenes_should_merge(item, scene, threshold)), None
+                )
+                if target is None:
+                    target = {**scene, "statements": []}
+                    merged_scenes.append(target)
+                by_name[key] = target
+            if id(target) not in inventories:
+                existing = target["statements"]
+                counts = Counter(cls._fusion_statement_key(statement) for statement in existing)
+                meanings = {
+                    cls._fusion_statement_key(statement, "meaning")
+                    for statement in existing
+                    if (cls._fusion_statement_key(statement), cls._fusion_statement_key(statement, "meaning"))
+                    in verified_meanings
+                }
+                inventories[id(target)] = (counts, meanings)
+            counts, meanings = inventories[id(target)]
+            for statement in scene["statements"]:
+                exact = cls._fusion_statement_key(statement)
+                if counts[exact]:
+                    if not deduplicate:
+                        counts[exact] -= 1
+                    continue
+                if deduplicate and statement.get("meaning") and cls._fusion_statement_key(statement, "meaning") in meanings:
+                    continue
+                target["statements"].append(statement)
+                if deduplicate:
+                    counts[exact] += 1
+
+    @classmethod
+    def _fusion_statement_key(cls, statement: Dict[str, Any], field: str = "text") -> tuple[str, str, str, str]:
+        name = str(statement.get("speaker_name") or "").strip()
+        speaker = str(statement.get("speaker") or "").strip() or (name if name != "未知" else "")
+        target = str(statement.get("target") or "大家").strip() or "大家"
+        context = str(statement.get("context") or "").strip()
+        value = str(statement.get(field) or "").strip()
+        return speaker, target, context, cls._normalize_key(value) if field == "meaning" else value
+
+    @staticmethod
+    def _remove_repeated_fusion_inputs(partials: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """复用旧模型内容时只把相同场景的完全相同范例送入一次。"""
+
+        seen: set[Tuple[str, str]] = set()
+        result = []
+        for partial in partials:
+            current = set()
+            scenes = []
+            for scene in partial.get("scenes") or []:
+                if not isinstance(scene, dict):
+                    continue
+                name = StyleAnalyzer._normalize_key(str(scene.get("name") or ""))
+                statements = []
+                for statement in scene.get("statements") or []:
+                    if not isinstance(statement, dict):
+                        continue
+                    content = {k: v for k, v in statement.items() if k != "id"}
+                    key = (name, json.dumps(content, ensure_ascii=False, sort_keys=True))
+                    if key not in seen:
+                        statements.append(statement)
+                    current.add(key)
+                scenes.append({**scene, "statements": statements})
+            result.append({**partial, "scenes": scenes})
+            seen.update(current)
+        return result
+
+    @staticmethod
+    def _restore_example_contexts(
+        merged: Dict[str, Any], partials: List[Dict[str, Any]]
+    ) -> None:
+        """按原话找回有来源的前文，保留同一句在不同场合的区别。"""
+
+        by_text: Dict[str, List[Tuple[Dict[str, Any], str]]] = {}
+        for partial in partials:
+            if not isinstance(partial, dict):
+                continue
+            for scene in partial.get("scenes") or []:
+                if not isinstance(scene, dict):
+                    continue
+                for statement in scene.get("statements") or []:
+                    if not isinstance(statement, dict):
+                        continue
+                    text = str(statement.get("text") or "").strip()
+                    if not text:
+                        continue
+                    context = statement.get("context")
+                    context = context.strip()[:_MAX_EXAMPLE_CONTEXT] if isinstance(context, str) else ""
+                    by_text.setdefault(text, []).append((statement, context))
+        for scene in merged["scenes"]:
+            for statement in scene["statements"]:
+                contexts = {
+                    context for source, context in by_text.get(statement["text"], [])
+                    if StyleAnalyzer._example_speakers_match(statement, source)
+                }
+                if statement.get("context") in contexts:
+                    continue
+                if len(contexts) == 1 and "" not in contexts:
+                    statement["context"] = next(iter(contexts))
+                else:
+                    statement.pop("context", None)
+
+    @staticmethod
+    def _example_speakers_match(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+        speaker_a = str(a.get("speaker") or "").strip()
+        speaker_b = str(b.get("speaker") or "").strip()
+        if speaker_a.isdecimal() and speaker_b.isdecimal():
+            return speaker_a == speaker_b
+        names_a = {speaker_a, str(a.get("speaker_name") or "").strip()} - {"", "未知"}
+        names_b = {speaker_b, str(b.get("speaker_name") or "").strip()} - {"", "未知"}
+        return not names_a or not names_b or bool(names_a & names_b)
+
+    @staticmethod
+    def _usage_matches(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+        context_a = str(a.get("context") or "").strip()
+        context_b = str(b.get("context") or "").strip()
+        return not context_a or not context_b or context_a == context_b
+
     @staticmethod
     def _collect_style_snapshots(partials: List[Dict[str, Any]]) -> List[str]:
         """收集各来源的整体风格快照（不合并，保留来源先后顺序，去空去重）。
 
-        优先取来源已有的 ``style_snapshots`` 列表；没有时用其 ``overall_style`` 单条。
+        优先取来源已有的风格快照，其次使用已融合的风格摘要或整体风格。
         """
 
         snapshots: List[str] = []
@@ -336,10 +596,9 @@ class StyleAnalyzer:
             if not isinstance(partial, dict):
                 continue
             existing = partial.get("style_snapshots")
-            if isinstance(existing, list):
-                items = [str(item).strip() for item in existing if str(item or "").strip()]
-            else:
-                items = [str(partial.get("overall_style") or "").strip()]
+            items = [str(item).strip() for item in existing if str(item or "").strip()] if isinstance(existing, list) else []
+            if not items:
+                items = [str(partial.get("style_summary") or partial.get("overall_style") or "").strip()]
             for item in items:
                 if item and item not in snapshots:
                     snapshots.append(item)
@@ -377,7 +636,13 @@ class StyleAnalyzer:
         return merged
 
     @staticmethod
-    def _merge_similar_scenes(scenes: List[Dict[str, Any]], threshold: float = SCENE_MERGE_SIMILARITY) -> List[Dict[str, Any]]:
+    def _merge_similar_scenes(
+        scenes: List[Dict[str, Any]],
+        threshold: float = SCENE_MERGE_SIMILARITY,
+        *,
+        deduplicate: bool = True,
+        preserve_speakers: bool = False,
+    ) -> List[Dict[str, Any]]:
         """场景按相似度合并：内容相似或重复的场景合并为一个（语句、风格描述合并），差异大的错开保留。
 
         场景名去掉标点/空白后相同（如「监狱保释梗」与「监狱/保释梗」）或互相包含（如「闲聊」
@@ -408,15 +673,29 @@ class StyleAnalyzer:
                 src_text = str(scene.get(key) or "").strip()
                 if src_text and len(src_text) > len(str(target.get(key) or "")):
                     target[key] = src_text
-            seen_texts = {str(st.get("text") or "").strip() for st in target.get("statements") or []}
+            current = target.setdefault("statements", [])
+            if not deduplicate:
+                current.extend(scene.get("statements") or [])
+                continue
             for statement in scene.get("statements") or []:
                 if not isinstance(statement, dict):
                     continue
                 text = str(statement.get("text") or "").strip()
-                if not text or text in seen_texts:
+                if not text:
                     continue
-                seen_texts.add(text)
-                target.setdefault("statements", []).append(json.loads(json.dumps(statement)))
+                existing = next(
+                    (
+                        index for index, item in enumerate(current)
+                        if str(item.get("text") or "").strip() == text
+                        and StyleAnalyzer._usage_matches(item, statement)
+                        and (not preserve_speakers or StyleAnalyzer._example_speakers_match(item, statement))
+                    ),
+                    None,
+                )
+                if existing is None:
+                    current.append(json.loads(json.dumps(statement)))
+                elif statement.get("context") and not current[existing].get("context"):
+                    current[existing] = json.loads(json.dumps(statement))
         return merged
 
     @staticmethod
@@ -514,13 +793,14 @@ class StyleAnalyzer:
                 (
                     index
                     for index, existing in enumerate(merged)
-                    if str(existing.get("text") or "").strip() == text
-                    or (
-                        aggressive
-                        and StyleAnalyzer._text_similarity(
-                            text, str(existing.get("text") or "")
+                    if StyleAnalyzer._usage_matches(existing, statement)
+                    and (
+                        str(existing.get("text") or "").strip() == text
+                        or (
+                            aggressive
+                            and StyleAnalyzer._text_similarity(text, str(existing.get("text") or ""))
+                            >= STATEMENT_MERGE_SIMILARITY
                         )
-                        >= STATEMENT_MERGE_SIMILARITY
                     )
                 ),
                 None,
@@ -531,7 +811,9 @@ class StyleAnalyzer:
             removed += 1
             target = merged[hit_index]
             src = statement
-            if len(text) > len(str(target.get("text") or "")):
+            target_priority = (bool(target.get("context")), len(str(target.get("text") or "")))
+            source_priority = (bool(src.get("context")), len(text))
+            if source_priority > target_priority:
                 target, src = src, target
             for key in ("meaning", "ai_note"):
                 if not str(target.get(key) or "").strip() and str(src.get(key) or "").strip():
@@ -649,6 +931,11 @@ class StyleAnalyzer:
         """清洗并规范化模型结构。"""
 
         model["overall_style"] = str(model.get("overall_style") or "").strip()
+        summary = model.get("style_summary")
+        if isinstance(summary, str) and summary.strip():
+            model["style_summary"] = summary.strip()
+        else:
+            model.pop("style_summary", None)
         snapshots = []
         for snapshot in model.get("style_snapshots") or []:
             text = str(snapshot).strip()
@@ -680,6 +967,12 @@ class StyleAnalyzer:
                 text = str(statement.get("text") or "").strip()
                 if not text:
                     continue
+                context = statement.get("context")
+                fields = (
+                    {"context": context.strip()[:_MAX_EXAMPLE_CONTEXT]}
+                    if isinstance(context, str) and context.strip()
+                    else {}
+                )
                 statements.append(
                     {
                         "id": str(statement.get("id") or f"st{index}_{len(statements)}"),
@@ -690,6 +983,7 @@ class StyleAnalyzer:
                         "meaning": str(statement.get("meaning") or "").strip(),
                         "ai_note": str(statement.get("ai_note") or "").strip(),
                         "tags": [str(t) for t in (statement.get("tags") or []) if str(t).strip()],
+                        **fields,
                     }
                 )
             scenes.append(

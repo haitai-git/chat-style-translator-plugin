@@ -12,19 +12,33 @@ import json
 import logging
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .style_profile import StyleProfileCache, build_model_profile
 
 logger = logging.getLogger("chat_style_translator.storage")
 
 
-def _atomic_write(path: Path, data: Dict[str, Any]) -> None:
-    """把字典以 UTF-8 原子写入指定路径。"""
+def _atomic_write(path: Path, data: Dict[str, Any]) -> tuple[int, int, int] | None:
+    """把字典以 UTF-8 原子写入，返回当前仍对应本次写入的文件版本。"""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(path)
+    temp_path = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        written = temp_path.stat()
+        temp_path.replace(path)
+        try:
+            current = path.stat()
+        except OSError:
+            return None
+        if (written.st_dev, written.st_ino, written.st_mtime_ns) == (current.st_dev, current.st_ino, current.st_mtime_ns):
+            return current.st_mtime_ns, current.st_ctime_ns, current.st_size
+        return None
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
@@ -33,10 +47,20 @@ def _read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
     if not path.is_file():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        logger.warning("配置文件损坏，使用默认值: %s", path)
-        return default
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(data, dict):
+            return data
+    except (ValueError, OSError):
+        pass
+    logger.warning("JSON 文件损坏或结构不正确，使用默认值: %s", path)
+    return default
+
+
+def _message_timestamp(message: Dict[str, Any]) -> float:
+    try:
+        return float(message.get("ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class StyleStore:
@@ -55,6 +79,8 @@ class StyleStore:
         self._groups_path = data_dir / "groups.json"
         self._messages_dir = data_dir / "messages"
         self._blacklist_path = data_dir / "blacklist.json"
+        self._profiles = StyleProfileCache(data_dir / "style_profiles_v1.sqlite3")
+        self._model_validity: Dict[str, tuple[tuple[int, int, int], bool]] = {}
 
     @property
     def model_dir(self) -> Path:
@@ -159,40 +185,44 @@ class StyleStore:
 
         data = _read_json(self._messages_path(group_id), {})
         items = data.get("items", [])
-        return items if isinstance(items, list) else []
+        return sorted(items, key=_message_timestamp) if isinstance(items, list) else []
 
     async def append_messages(self, group_id: str, messages: List[Dict[str, Any]], max_stored: int = 0) -> int:
-        """批量追加收集消息（历史回填用），按消息 ID 去重，返回该群当前消息总数。
+        """合并历史消息，返回该群当前消息总数。"""
 
-        Args:
-            group_id: QQ 群号。
-            messages: 收集记录列表；无有效文本的记录会被跳过，ID 与已有记录重复的会去重。
-            max_stored: 存储上限；>0 时超出部分自动删除最旧消息，只保留最近 max_stored 条。
-        """
+        _, total = await self.merge_history(group_id, messages, max_stored)
+        return total
 
-        group_id = str(group_id).strip()
-        valid = [m for m in messages if str(m.get("text") or "").strip() and isinstance(m, dict)]
-        if not valid:
-            return self.message_count(group_id)
+    async def merge_history(
+        self, group_id: str, messages: List[Dict[str, Any]], max_stored: int = 0
+    ) -> tuple[int, int]:
+        """按消息时间合并、去重及裁剪，返回实际保留的新增条数和当前总数。"""
+
+        valid = [m for m in messages if isinstance(m, dict) and str(m.get("text") or "").strip()]
         async with self._lock:
-            data = _read_json(self._messages_path(group_id), {})
+            path = self._messages_path(group_id)
+            data = _read_json(path, {})
             items = data.get("items", [])
             if not isinstance(items, list):
                 items = []
-            seen = {str(item.get("id") or "") for item in items}
+            seen = {str(item.get("id") or "").strip() for item in items}
+            inserted = []
             for message in valid:
                 message_id = str(message.get("id") or "").strip()
+                if message_id and message_id in seen:
+                    continue
                 if message_id:
-                    if message_id in seen:
-                        continue
                     seen.add(message_id)
-                items.append(message)
-            if max_stored > 0 and len(items) > max_stored:
-                items = items[-max_stored:]
-            data["items"] = items
-            data["count"] = len(items)
-            _atomic_write(self._messages_path(group_id), data)
-            return len(items)
+                inserted.append(message.copy())
+            incoming = {id(message) for message in inserted}
+            retained = sorted([*items, *inserted], key=_message_timestamp)
+            if max_stored > 0:
+                retained = retained[-max_stored:]
+            added = sum(id(message) in incoming for message in retained)
+            if retained != items:
+                data.update(items=retained, count=len(retained))
+                _atomic_write(path, data)
+            return added, len(retained)
 
     async def append_message(self, group_id: str, message: Dict[str, Any], max_stored: int = 0) -> int:
         """追加一条收集消息，返回该群当前消息总数。
@@ -211,7 +241,7 @@ class StyleStore:
                 items = []
             items.append(message)
             if max_stored > 0 and len(items) > max_stored:
-                items = items[-max_stored:]
+                items = sorted(items, key=_message_timestamp)[-max_stored:]
             data["items"] = items
             data["count"] = len(items)
             _atomic_write(self._messages_path(group_id), data)
@@ -243,11 +273,32 @@ class StyleStore:
                 items = []
             if len(items) <= keep:
                 return len(items)
-            items = items[-keep:]
+            items = sorted(items, key=_message_timestamp)[-keep:]
             data["items"] = items
             data["count"] = len(items)
             _atomic_write(self._messages_path(group_id), data)
             return len(items)
+
+    async def remove_messages(self, group_id: str, consumed: List[Dict[str, Any]]) -> None:
+        """只清理分析快照中已处理的记录，保留后来追加的消息。"""
+
+        remaining = Counter(json.dumps(message, sort_keys=True) for message in consumed)
+        async with self._lock:
+            path = self._messages_path(group_id)
+            data = _read_json(path, {})
+            items = data.get("items")
+            if not isinstance(items, list):
+                return
+            kept = []
+            for message in items:
+                key = json.dumps(message, sort_keys=True)
+                if remaining[key] > 0:
+                    remaining[key] -= 1
+                else:
+                    kept.append(message)
+            if len(kept) < len(items):
+                data.update(items=kept, count=len(kept))
+                _atomic_write(path, data)
 
     async def clear_messages(self, group_id: str) -> None:
         """清空指定群已收集的消息。"""
@@ -270,17 +321,26 @@ class StyleStore:
         内容损坏（JSON 解析失败）的文件会被跳过。按修改时间倒序返回。
         """
 
-        if not self._model_dir.is_dir():
-            return []
+        return [file_id for file_id, _ in self.model_catalog()]
+
+    def model_catalog(self) -> tuple[tuple[str, tuple[int, int, int]], ...]:
+        """扫描模型文件版本，仅重新校验新增或改动的模型。"""
+
+        validity = {}
         entries = []
         for path in self._model_dir.glob("*.json"):
-            try:
-                json.loads(path.read_text(encoding="utf-8"))
-                entries.append((path, path.stat().st_mtime))
-            except (json.JSONDecodeError, OSError):
+            file_id = path.stem
+            revision = self.model_revision(file_id)
+            if revision is None:
                 continue
-        entries.sort(key=lambda item: item[1], reverse=True)
-        return [path.stem for path, _ in entries]
+            cached = self._model_validity.get(file_id)
+            valid = cached[1] if cached and cached[0] == revision else bool(self.get_model_profile(file_id))
+            validity[file_id] = (revision, valid)
+            if valid:
+                entries.append((file_id, revision))
+        self._model_validity = validity
+        entries.sort(key=lambda item: (item[1][0], item[0]), reverse=True)
+        return tuple(entries)
 
     def list_models(self) -> List[Dict[str, Any]]:
         """返回全部模型的摘要信息。"""
@@ -292,46 +352,86 @@ class StyleStore:
                 models.append(model)
         return models
 
+    def model_revision(self, file_id: str) -> tuple[int, int, int] | None:
+        try:
+            stat = self._model_path(file_id).stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+    def _profile_key(self, file_id: str) -> str:
+        return str(self._model_dir.absolute() / f"{file_id}.json")
+
+    def _update_model_profile(
+        self, file_id: str, revision: tuple[int, int, int], model: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        profile = build_model_profile(model)
+        if self.model_revision(file_id) == revision:
+            self._profiles.replace(self._profile_key(file_id), json.dumps(revision), profile, model)
+        return profile
+
+    def get_model_profile(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """读取小型风格档案，导入或外部修改后按当前文件重建。"""
+
+        revision = self.model_revision(file_id)
+        if revision is None:
+            return None
+        profile = self._profiles.get(self._profile_key(file_id), json.dumps(revision))
+        if profile is not None:
+            return profile
+        model = _read_json(self._model_path(file_id), {})
+        if model and self.model_revision(file_id) == revision:
+            return self._update_model_profile(file_id, revision, model)
+        return None
+
+    def get_member_style(self, file_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        revision = self.model_revision(file_id)
+        if revision is None:
+            file_id = self.find_model_file(file_id) or file_id
+            revision = self.model_revision(file_id)
+        if revision is None:
+            return None
+        return self._profiles.get_member(self._profile_key(file_id), json.dumps(revision), user_id)
+
     def get_model(self, model_id: str) -> Optional[Dict[str, Any]]:
         """按模型文件名、ID 或名称读取模型，不存在时返回 None。"""
 
         model_id = str(model_id).strip()
         path = self._model_path(model_id)
         if path.is_file():
-            return _read_json(path, {})
+            return _read_json(path, {}) or None
         for model_file_id in self.list_model_ids():
-            model = self.get_model(model_file_id)
-            if model is None:
-                continue
-            if model.get("model_id") == model_id or model.get("name") == model_id:
-                return model
+            profile = self.get_model_profile(model_file_id)
+            if profile and model_id in (profile.get("model_id"), profile.get("name")):
+                return _read_json(self._model_path(model_file_id), {}) or None
         return None
 
-    def find_model_file(self, name_or_id: str) -> Optional[str]:
-        """按模型文件名、ID 或名称（支持前缀）返回模型文件名（不带 .json）。
-
-        返回的是模型保存目录中的文件名，可直接用于 get_model / 挂载引用。
-        """
-
+    def find_model_files(self, name_or_id: str, available: List[str] | None = None) -> List[str]:
         needle = str(name_or_id or "").strip()
         if not needle:
-            return None
-        model_ids = self.list_model_ids()
-        if needle in model_ids:
-            return needle
-        for model_file_id in model_ids:
-            model = self.get_model(model_file_id)
+            return []
+        paths = self.list_model_ids() if available is None else available
+        if needle in paths:
+            return [needle]
+        if needle.lower().endswith(".json") and needle[:-5] in paths:
+            return [needle[:-5]]
+        by_id, by_name, by_prefix = [], [], []
+        for file_id in paths:
+            model = self.get_model_profile(file_id)
             if model is None:
                 continue
-            if model.get("model_id") == needle or model.get("name") == needle:
-                return model_file_id
-        for model_file_id in model_ids:
-            model = self.get_model(model_file_id)
-            if model is None:
-                continue
-            if str(model.get("name", "")).startswith(needle):
-                return model_file_id
-        return None
+            label = str(model.get("name") or "")
+            if model.get("model_id") == needle:
+                by_id.append(file_id)
+            if label == needle:
+                by_name.append(file_id)
+            elif label.startswith(needle):
+                by_prefix.append(file_id)
+        return by_id or by_name or by_prefix
+
+    def find_model_file(self, name_or_id: str) -> Optional[str]:
+        matches = self.find_model_files(name_or_id)
+        return matches[0] if matches else None
 
     def find_model(self, name_or_id: str) -> Optional[Dict[str, Any]]:
         """按模型名（支持前缀）、ID 或模型文件名查找模型。"""
@@ -341,7 +441,7 @@ class StyleStore:
             return None
         return self.get_model(model_file_id)
 
-    async def save_model(self, model: Dict[str, Any]) -> None:
+    async def save_model(self, model: Dict[str, Any], *, file_id: str | None = None) -> None:
         """保存模型（写入模型保存目录，可直接手动编辑该文件）。
 
         更新已有模型（如 /风格启用、/风格重命名）时：按内部 model_id 精确定位
@@ -354,15 +454,21 @@ class StyleStore:
             model_id = self.new_model_id()
             model["model_id"] = model_id
         model["updated_at"] = time.time()
-        target_file = None
-        for file_id in self.list_model_ids():
-            existing = self.get_model(file_id)
-            if existing is not None and str(existing.get("model_id") or "") == model_id:
-                target_file = file_id
-                break
-        path = self._model_path(target_file) if target_file else self._model_path(model_id)
         async with self._lock:
-            _atomic_write(path, model)
+            target_file = file_id
+            if target_file is None:
+                for candidate in self.list_model_ids():
+                    profile = self.get_model_profile(candidate)
+                    if profile and str(profile.get("model_id") or "") == model_id:
+                        target_file = candidate
+                        break
+            target_file = target_file or model_id
+            path = self._model_path(target_file)
+            if file_id is not None and not path.is_file():
+                raise FileNotFoundError(path)
+            revision = _atomic_write(path, model)
+            if revision is not None:
+                self._update_model_profile(target_file, revision, model)
 
     async def delete_model(self, model_id: str) -> bool:
         """删除模型（按文件名 / ID / 名称匹配），并从所有绑定群的挂载列表移除。
@@ -377,6 +483,7 @@ class StyleStore:
             if not path.is_file():
                 return False
             path.unlink(missing_ok=True)
+            self._profiles.remove(self._profile_key(path.stem))
         for group in self.list_groups().values():
             active = group.get("active_models", [])
             if isinstance(active, list) and target_file in active:

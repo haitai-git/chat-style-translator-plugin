@@ -15,6 +15,11 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("chat_style_translator.garbage_guard")
 
+_ID_FIELD = r"(?:msg_id|message_id|(?:reply_)?session_id|stream_id|(?:引用)?消息\s*ID)"
+_ID_VALUE = r"(?:-?[0-9]{6,}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|[a-f0-9]{12,})"
+_DEBUG_FIELD = r"(?:retry_count|max_retries|completion_tokens|prompt_tokens)"
+_CODE_SPANS = re.compile(r"```[\s\S]*?```|`[^`\r\n]+`")
+
 
 @dataclass(frozen=True)
 class GarbageRule:
@@ -23,6 +28,7 @@ class GarbageRule:
     pattern: str
     name: str
     description: str
+    outside_code: bool = False
     regex: re.Pattern[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -38,45 +44,42 @@ class GarbageMatch:
 
 
 DEFAULT_RULES: Tuple[GarbageRule, ...] = (
-    # 指令片段泄漏：本次事故的"为起点按序取字"类残片
     GarbageRule(
-        pattern=r"为起点按序取字|按序取字|若引用.*消息.*第\d+至\d+个字符|"
-        r"对应原文第\d+至\d+个字|第二个字符\s*\d+\s*[:：]|命中该标签|"
-        r"起始序号|元组\s*\(|需要判断目标消息是否命中",
+        pattern=r"为起点按序取字|若引用.*消息.*第\d+至\d+个字符|"
+        r"对应原文第\d+至\d+个字|第二个字符\s*\d+\s*[:：]|需要判断目标消息是否(?:真的|确实)?命中",
         name="指令片段泄漏",
         description="回复中出现了疑似任务指令残片（取字/标签判断等）",
     ),
-    # 内部标识符泄漏
     GarbageRule(
-        pattern=r"\bmsg_id\b|\bmessage_id\b|\b(?:reply_)?session_id\b|stream_id\b|"
-        r"\bretry_count\b|\bmax_retries\b|\bcompletion_tokens\b|\bprompt_tokens\b|"
-        r"\btool_calls\b|\bmatched_regex\b|selected_expression|消息ID\s*[:=]|引用消息ID",
+        pattern=(
+            rf"""(?<![\w"'“‘「])["']?{_ID_FIELD}["']?[ \t]*[:=：][ \t]*"""
+            rf"""(?:["']{_ID_VALUE}["']|{_ID_VALUE})(?=$|[\s,，;；}}\]>。])|"""
+            rf"""(?<!\w)"?{_DEBUG_FIELD}"?[ \t]*[:=][ \t]*\d+[\s,;]+"?{_DEBUG_FIELD}"?[ \t]*[:=][ \t]*\d+\b"""
+        ),
         name="内部标识符泄漏",
-        description="回复中出现了系统内部标识符（msg_id/session_id 等）",
+        description="回复包含带具体值的内部 ID 或成组调试字段",
+        outside_code=True,
     ),
-    # 消息模板 / 富媒体描述泄漏
     GarbageRule(
         pattern=r"<message |<system-reminder>|\[图片[:：]|\[表情[:：]|\[视频[:：]|"
         r"quote=\d+|group_card=",
         name="消息模板泄漏",
         description="回复中出现了消息模板或图片/引用描述残片",
     ),
-    # JSON / 代码结构泄漏
     GarbageRule(
-        pattern=r'"msg_id"\s*[:=]|"type"\s*:\s*"text"|"data"\s*:\s*\{|"content"\s*:\s*"',
+        pattern=r'(?m)^[ \t]*\{\s*"type"\s*:\s*"text"\s*,\s*"data"\s*:\s*\{\s*"text"\s*:',
         name="JSON 结构泄漏",
-        description="回复中出现了 JSON 结构片段",
+        description="回复像是直接输出了 OneBot 消息结构",
+        outside_code=True,
     ),
-    # 编码乱码
     GarbageRule(
-        pattern=r"\ufffd|锟斤拷|锘|烫烫|屯屯|�",
+        pattern=r"\ufffd|锟斤拷|锘[縴锛銆]|(?<![\u3400-\u9fff])(?:烫{3,}|屯{3,})(?![\u3400-\u9fff])",
         name="编码乱码",
         description="回复中存在乱码字符（替换符/编码错误等）",
     ),
-    # 推理过程泄漏
     GarbageRule(
-        pattern=r"按之前的推算|我们需要判断|草稿.*取字|无法微调成.*风格而不改变意思|"
-        r"原样输出|目标命中|得出结论\s*[:：]",
+        pattern=r"按之前的推算.{0,30}从\s*\d+\s*开始|草稿.*取字|无法微调成.*风格而不改变意思|"
+        r"目标命中[\s，,：:]*(?:所以|应当|应该|直接).{0,12}(?:回复|输出)",
         name="推理内容泄漏",
         description="回复中出现了模型推理过程片段",
     ),
@@ -124,8 +127,9 @@ def detect_garbage(
 
     if not text:
         return None
+    prose = _CODE_SPANS.sub(lambda span: re.sub(r"[^\r\n]", " ", span[0]), text)
     for rule in rules if rules is not None else _build_rules(extra_patterns):
-        match = rule.regex.search(text)
+        match = rule.regex.search(prose if rule.outside_code else text)
         if match:
             return GarbageMatch(rule=rule, matched_text=match.group(0))
     return None

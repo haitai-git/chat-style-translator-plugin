@@ -103,48 +103,27 @@ class TestComponents:
                 assert pattern, component
                 re.compile(pattern)
 
-    @pytest.mark.parametrize(
-        "pattern, good, bad",
-        [
-            (r"^/风格帮助$", ["/风格帮助"], ["/风格帮助 "]),
-            (r"^/风格绑定群\s+(?P<group_id>\d+)$", ["/风格绑定群 123456"], ["/风格绑定群", "/风格绑定群 abc"]),
-            (r"^/风格解绑群\s+(?P<group_id>\d+)$", ["/风格解绑群 123"], ["/风格解绑群"]),
-            (r"^/风格状态$", ["/风格状态"], ["/风格状态x"]),
-            (r"^/风格生成(?:\s+(?P<group_id>\d+))?$", ["/风格生成", "/风格生成 123"], ["/风格生成 12a"]),
-            (r"^/风格列表$", ["/风格列表"], ["/风格列表 1"]),
-            (r"^/风格详情\s+(?P<model_name>\S+)$", ["/风格详情 模型A"], ["/风格详情"]),
-            (r"^/风格场景\s+(?P<model_name>\S+)(?:\s+(?P<scene_index>\d+))?$",
-             ["/风格场景 模型A", "/风格场景 模型A 2"], ["/风格场景"]),
-            (r"^/风格启用\s+(?P<model_name>\S+)(?:\s+(?P<group_id>\d+))?$",
-             ["/风格启用 模型A", "/风格启用 模型A 123"], ["/风格启用"]),
-            (r"^/风格停用\s+(?P<model_name>\S+)(?:\s+(?P<group_id>\d+))?$", ["/风格停用 模型A"], ["/风格停用"]),
-            (r"^/风格全局启用\s+(?P<model_name>\S+)$", ["/风格全局启用 模型A"], ["/风格全局启用"]),
-            (r"^/风格全局停用\s+(?P<model_name>\S+)$", ["/风格全局停用 模型A"], ["/风格全局停用"]),
-            (r"^/风格合并\s+(?P<model_a>\S+)\s+(?P<model_b>\S+)(?:\s+(?P<new_name>\S+))?$",
-             ["/风格合并 A B", "/风格合并 A B 新名"], ["/风格合并 A"]),
-            (r"^/风格删除语句\s+(?P<model_name>\S+)\s+(?P<statement_id>\S+)$",
-             ["/风格删除语句 模型A st1"], ["/风格删除语句 模型A"]),
-            (r"^/风格删除场景\s+(?P<model_name>\S+)\s+(?P<scene_ref>\S+)$",
-             ["/风格删除场景 模型A 1"], ["/风格删除场景 模型A"]),
-            (r"^/风格重命名\s+(?P<model_name>\S+)\s+(?P<new_name>\S+)$",
-             ["/风格重命名 模型A 新名"], ["/风格重命名 模型A"]),
-            (r"^/风格删除模型\s+(?P<model_name>\S+)$", ["/风格删除模型 模型A"], ["/风格删除模型"]),
-            (r"^/黑名单添加\s+(?P<text>.+)$", ["/黑名单添加 骂人的话"], ["/黑名单添加"]),
-            (r"^/黑名单添加模型\s+(?P<model_name>\S+)\s+(?P<text>.+)$",
-             ["/黑名单添加模型 模型A 骂人的话"], ["/黑名单添加模型 模型A"]),
-            (r"^/黑名单删除\s+(?P<item_id>\S+)$", ["/黑名单删除 bl_1"], ["/黑名单删除"]),
-            (r"^/黑名单列表$", ["/黑名单列表"], ["/黑名单列表 1"]),
-            (r"^/黑名单清空$", ["/黑名单清空"], ["/黑名单清空 1"]),
-            (r"^/风格拉取历史(?:\s+(?P<group_id>\d+))?(?:\s+(?P<count>\d+))?$",
-             ["/风格拉取历史", "/风格拉取历史 123", "/风格拉取历史 123 300"], ["/风格拉取历史 abc"]),
-        ],
-    )
-    def test_command_patterns(self, pattern: str, good: List[str], bad: List[str]) -> None:
-        regex = re.compile(pattern)
-        for text in good:
-            assert regex.match(text), f"{text!r} 应匹配 {pattern}"
-        for text in bad:
-            assert regex.match(text) is None, f"{text!r} 不应匹配 {pattern}"
+    @pytest.mark.parametrize("command, expected", [
+        ("/风格", "style_help"),
+        (" /风格帮助 ", "style_help"),
+        ("／风格绑定群", "style_bind_group"),
+        ("/风格详情", "style_detail"),
+        ('/风格重命名 "旧 模型" “新 模型”', "style_rename"),
+        ('/风格融合 A B “新 模型”', "style_merge"),
+        ("/黑名单添加模型 A 骂人的话", "blacklist_add_model"),
+        ("/风格拉取历史 300条", "style_backfill"),
+        ("/风格状态x", None),
+        ("风格列表", None),
+        ("/风格绑定群没有空格", None),
+    ])
+    def test_command_patterns(self, command: str, expected: Optional[str]) -> None:
+        from maibot_sdk.components import collect_components
+
+        matches = [
+            item["name"] for item in collect_components(ChatStyleTranslatorPlugin())
+            if item["type"] == "COMMAND" and re.match(item["metadata"]["command_pattern"], command)
+        ]
+        assert matches == ([expected] if expected else [])
 
 
 class TestCommands:
@@ -170,7 +149,7 @@ class TestCommands:
         return str(model["model_id"])
 
     def owner_kwargs(self, **extra: Any) -> Dict[str, Any]:
-        return {"user_id": "123456789", "message": sample_message(), **extra}
+        return {"platform": "qq", "user_id": "123456789", "message": sample_message(), **extra}
 
     def test_help(self) -> None:
         plugin = make_plugin()
@@ -192,13 +171,13 @@ class TestCommands:
     def test_model_commands(self, tmp_path: Path) -> None:
         plugin, store = self.make_env(tmp_path)
         model_id = self.save_model(store, "风格模型A")
-        ok, text, _ = run(plugin.cmd_list(**self.owner_kwargs()))
+        ok, text, _ = run(plugin.cmd_list(**self.owner_kwargs(is_local_operator=True)))
         assert ok and "风格模型A" in text and model_id in text
-        ok, text, _ = run(plugin.cmd_detail(**self.owner_kwargs(matched_groups={"model_name": "风格模型A"})))
+        ok, text, _ = run(plugin.cmd_detail(**self.owner_kwargs(is_local_operator=True, matched_groups={"model_name": "风格模型A"})))
         assert ok and "整体风格" in text and "小明" in text
-        ok, text, _ = run(plugin.cmd_scene(**self.owner_kwargs(matched_groups={"model_name": "风格模型A"})))
-        assert ok and "原话" in text
-        ok, text, _ = run(plugin.cmd_scene(**self.owner_kwargs(
+        ok, text, _ = run(plugin.cmd_scene(**self.owner_kwargs(is_local_operator=True, matched_groups={"model_name": "风格模型A"})))
+        assert ok and "闲聊" in text and "：“原话”" not in text
+        ok, text, _ = run(plugin.cmd_scene(**self.owner_kwargs(is_local_operator=True,
             matched_groups={"model_name": "风格模型A", "scene_index": "1"})))
         assert ok and "原话" in text
         ok, text, _ = run(plugin.cmd_rename(**self.owner_kwargs(
@@ -206,7 +185,7 @@ class TestCommands:
         assert ok and "新名字" in text
         assert store.find_model("新名字") is not None
         # 未找到模型
-        ok, text, _ = run(plugin.cmd_detail(**self.owner_kwargs(matched_groups={"model_name": "不存在"})))
+        ok, text, _ = run(plugin.cmd_detail(**self.owner_kwargs(is_local_operator=True, matched_groups={"model_name": "不存在"})))
         assert ok and "未找到" in text
 
     def test_enable_disable_flow(self, tmp_path: Path) -> None:
@@ -229,15 +208,16 @@ class TestCommands:
         ok, text, _ = run(plugin.cmd_global_enable(**self.owner_kwargs(matched_groups={"model_name": "风格模型A"})))
         assert ok and "全局通用" in text
         assert plugin._global_models
-        # 「模型目录自动生效」默认开启：模型文件仍会自动全局生效，停用后仍在全局列表
+        plugin._config_global_models = [model_id]
+        run(plugin._refresh_global_models())
         ok, text, _ = run(plugin.cmd_global_disable(**self.owner_kwargs(matched_groups={"model_name": "风格模型A"})))
         assert ok and "已关闭" in text
-        assert model_id in plugin._global_models
-        assert store.get_model(model_id).get("global_apply") is False
-        # 关闭「模型目录自动生效」后，停用全局才会真正从全局列表移除
-        plugin._auto_enable_models = False
         run(plugin._refresh_global_models())
-        assert not plugin._global_models
+        assert plugin._resolve_active_models("其它群") == []
+        assert store.get_model(model_id).get("global_apply") is False
+        assert store.get_model(model_id).get("global_disabled") is True
+        run(plugin.cmd_global_enable(**self.owner_kwargs(matched_groups={"model_name": "风格模型A"})))
+        assert plugin._resolve_active_models("其它群") == [model_id]
 
     def test_delete_and_remove(self, tmp_path: Path) -> None:
         plugin, store = self.make_env(tmp_path)
@@ -258,7 +238,7 @@ class TestCommands:
         ok, text, _ = run(plugin.cmd_blacklist_add(**self.owner_kwargs(matched_groups={"text": "骂人的话"})))
         assert ok and "已添加通用黑名单" in text
         item = store.list_blacklist()[0]
-        ok, text, _ = run(plugin.cmd_blacklist_list(**self.owner_kwargs()))
+        ok, text, _ = run(plugin.cmd_blacklist_list(**self.owner_kwargs(is_local_operator=True)))
         assert ok and "骂人的话" in text and item["id"] in text
         ok, text, _ = run(plugin.cmd_blacklist_remove(**self.owner_kwargs(matched_groups={"item_id": item["id"]})))
         assert ok and "已删除" in text

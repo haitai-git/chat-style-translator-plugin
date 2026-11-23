@@ -12,21 +12,30 @@ from chat_style_translator_plugin.modules.garbage_guard import (
 )
 from chat_style_translator_plugin.plugin import ChatStyleTranslatorPlugin
 
-# 本次事故中的真实乱码回复
+# 模拟的乱码回复
 INCIDENT_TEXT = (
-    "想和爱丽丝一起姓爱。”为起点按序取字。若引用的消息ID=2115347768，"
-    "其内容“想和爱丽丝一起姓爱。”为第2至11个字符，对应原文第2至11个字"
-    "“想和爱丽丝一起姓爱。”。 第二个字符2：2=“”，与原文字符“”?"
+    "出门前记得带上那把蓝伞。”为起点按序取字。若引用的消息ID=1234567890，"
+    "其内容“出门前记得带上那把蓝伞。”为第2至11个字符，对应原文第2至11个字"
+    "“出门前记得带上那把蓝伞。”。 第二个字符2：2=“”，与原文字符“”?"
 )
 
 NORMAL_TEXTS = [
     "晚安啦",
-    "绝密巴克什出货率高些，大坝西楼保险房偶尔也能摸到呗",
-    "普通的红弹又不贵",
-    "哥几个马上中元节我真想退出了",
-    "试了下机密狙打m61",
-    "我觉得萝莉控不该被电，虎门销烟销的是烟，不是抽烟的人",
+    "深海地图掉材料快些，北边的空房偶尔也能捡到呗",
+    "这把普通的弓又不贵",
+    "哥几个都打了三把了，我先退出了",
+    "试了下那把弓配二级箭",
+    "我觉得应该把灯打开，检查的是灯泡，不是开关",
     "今天天气不错，一起出去玩吧",
+    "这个接口的 message_id 从哪拿呀？",
+    "有个 session_id 跟前两组的不一样",
+    '回复内容包含 "msg_id": "123" 的 JSON',
+    "这里的 retry_count=3 是失败次数吗",
+    "这杯还烫烫的，等凉了再喝",
+    "从起始序号开始遍历，然后原样输出。",
+    "我们需要判断数组索引是否越界。",
+    "字段可以写成 " + chr(96) + "message_id=1234567890" + chr(96) + " 作为例子。",
+    "代码举例如下\n" + chr(96) * 3 + 'json\n{"type":"text","data":{"text":"你好"}}\n' + chr(96) * 3,
     "？",
 ]
 
@@ -39,17 +48,18 @@ class TestDetectGarbage:
 
     def test_msg_id_leak_detected(self) -> None:
         for text in (
-            "之前的回复出现了异常输出 msg_id=2115347768 需要重新发送",
-            "消息ID=2115347768 的内容是第2至11个字符",
-            '回复内容包含 "msg_id": "123" 的 JSON',
+            "之前的回复出现了异常输出 msg_id=1234567890 需要重新发送",
+            "消息ID=1234567890 的内容是第2至11个字符",
+            '{"msg_id": "1234567890", "role": "assistant"}',
+            "retry_count=2, max_retries=3",
         ):
             assert detect_garbage(text) is not None, text
 
     def test_message_template_leak_detected(self) -> None:
         for text in (
-            "<message msg_id=\"123\" time=\"01:00\" user=\"海苔\">\n晚安",
+            "<message msg_id=\"123\" time=\"01:00\" user=\"测试用户\">\n晚安",
             "[图片：金发兽耳少女自拍]",
-            "quote=2076501469 哪里有杯子",
+            "quote=9876543210 哪里有杯子",
         ):
             assert detect_garbage(text) is not None, text
 
@@ -131,13 +141,25 @@ class TestGuardHook:
 
     def test_retry_disabled_log_only(self) -> None:
         plugin = make_plugin(garbage_guard={"enabled": True, "retry_on_detect": False})
-        result = run(plugin.guard_garbage_response(response=INCIDENT_TEXT, session_id="sess-1"))
+        result = run(plugin.guard_garbage_response(response=INCIDENT_TEXT, session_id="sess-1", retry_count=3, max_retries=3))
         assert result == {"action": "continue"}
 
-    def test_short_text_skipped(self) -> None:
+    def test_short_normal_text_continues(self) -> None:
         plugin = make_plugin()
         result = run(plugin.guard_garbage_response(response="原样", session_id="sess-1"))
         assert result == {"action": "continue"}
+
+
+    def test_short_garble_retries_and_aborts_at_host_limit(self) -> None:
+        plugin = make_plugin()
+        first = run(plugin.guard_garbage_response(response="\uFFFD", retry_count=0, max_retries=3))
+        assert first["modified_kwargs"]["retry"] is True
+        final = run(plugin.guard_garbage_response(response="\uFFFD", retry_count=3, max_retries=3))
+        assert final == {"action": "abort", "custom_result": {"reason": "回复重试后仍命中乱码拦截"}}
+        for normal in ("好", "烫烫", "原样"):
+            assert run(plugin.guard_garbage_response(
+                response=normal, retry_count=3, max_retries=3,
+            )) == {"action": "continue"}
 
     def test_custom_patterns_from_config(self) -> None:
         plugin = make_plugin(garbage_guard={"custom_patterns": [r"猪头"]})

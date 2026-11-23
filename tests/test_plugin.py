@@ -259,7 +259,9 @@ class TestExtractors:
 
     def test_owner_permission(self) -> None:
         plugin = make_plugin(owner={"qq": ["123456789"]})
-        assert plugin._is_owner({"user_id": "123456789"}) is True
+        assert plugin._is_owner({"platform": "qq", "user_id": "123456789"}) is True
+        assert plugin._is_owner({"platform": "discord", "user_id": "123456789"}) is False
+        assert plugin._is_owner({"user_id": "123456789"}) is False
         assert plugin._is_owner({"user_id": "别人"}) is False
         assert plugin._is_owner({"is_local_operator": True}) is True
         assert plugin._is_owner({}) is False
@@ -267,12 +269,12 @@ class TestExtractors:
     def test_merge_options_from_config(self) -> None:
         plugin = make_plugin(merge={"ratio_a": 70, "dedup_level": "激进精简", "max_total_statements": 120})
         assert plugin._merge_options_from_config() == {
-            "ratio": (70, 30), "dedup_level": "激进精简", "max_total_statements": 120,
+            "ratio": (70, 30), "dedup_level": "激进精简",
             "scene_merge_threshold": 0.8, "snapshot_merge_threshold": 0.55,
         }
         plugin2 = make_plugin(merge={"scene_merge_threshold": 0.9, "snapshot_merge_threshold": 0.4})
         assert plugin2._merge_options_from_config() == {
-            "ratio": (50, 50), "dedup_level": "标准", "max_total_statements": 0,
+            "ratio": (50, 50), "dedup_level": "标准",
             "scene_merge_threshold": 0.9, "snapshot_merge_threshold": 0.4,
         }
         # 防御性钳制（正常配置模型已校验范围，这里直接注入非法值验证钳制逻辑）
@@ -280,7 +282,7 @@ class TestExtractors:
         plugin3 = make_plugin()
         plugin3._plugin_config_instance = type("Cfg", (), {"merge": stub_merge})()  # type: ignore[attr-defined]
         assert plugin3._merge_options_from_config() == {
-            "ratio": (100, 0), "dedup_level": "标准", "max_total_statements": 0,
+            "ratio": (100, 0), "dedup_level": "标准",
             "scene_merge_threshold": 0.8, "snapshot_merge_threshold": 0.55,
         }
 
@@ -437,7 +439,6 @@ class TestAutoMerge:
         assert received["options"] == {
             "ratio": (80, 20),
             "dedup_level": "激进精简",
-            "max_total_statements": 100,
             "scene_merge_threshold": 0.8,
             "snapshot_merge_threshold": 0.55,
         }
@@ -505,7 +506,6 @@ class TestAutoCompact:
         })
         assert plugin._compact_options_from_config() == {
             "dedup_level": "激进精简",
-            "max_total_statements": 100,
             "scene_merge_threshold": 0.9,
             "snapshot_merge_threshold": 0.4,
         }
@@ -515,7 +515,6 @@ class TestAutoCompact:
         plugin2._plugin_config_instance = type("Cfg", (), {"compact": stub_compact})()  # type: ignore[attr-defined]
         assert plugin2._compact_options_from_config() == {
             "dedup_level": "标准",
-            "max_total_statements": 0,
             "scene_merge_threshold": 0.8,
             "snapshot_merge_threshold": 0.55,
         }
@@ -720,6 +719,7 @@ class TestRewriteHook:
             response: str,
             original_response: str = "",
             forbidden_words: Optional[List[str]] = None,
+            *, incoming_text: str = "",
         ) -> Optional[str]:
             result = await llm.generate([{"role": "user", "content": response}])
             if not result.get("success"):
@@ -737,33 +737,33 @@ class TestRewriteHook:
     def test_no_inject_disabled(self, tmp_path: Path) -> None:
         plugin, store, _ = self.make_env(tmp_path, inject={"enabled": False})
         self.mount(store)
-        result = run(plugin.rewrite_style_response(response="你好世界", session_id="sess-1"))
+        result = run(plugin.rewrite_style_response(response="你好全世界", session_id="sess-1"))
         assert result == {"action": "continue"}
 
     def test_short_or_missing(self, tmp_path: Path) -> None:
         plugin, _, _ = self.make_env(tmp_path)
         assert run(plugin.rewrite_style_response(response="", session_id="sess-1")) == {"action": "continue"}
         assert run(plugin.rewrite_style_response(response="短", session_id="sess-1")) == {"action": "continue"}
-        assert run(plugin.rewrite_style_response(response="你好世界", session_id="")) == {"action": "continue"}
-        assert run(plugin.rewrite_style_response(response="你好世界", session_id="未知")) == {"action": "continue"}
+        assert run(plugin.rewrite_style_response(response="你好全世界", session_id="")) == {"action": "continue"}
+        assert run(plugin.rewrite_style_response(response="你好全世界", session_id="未知")) == {"action": "continue"}
 
     def test_no_active_models(self, tmp_path: Path) -> None:
         plugin, _, _ = self.make_env(tmp_path)
-        assert run(plugin.rewrite_style_response(response="你好世界", session_id="sess-1")) == {"action": "continue"}
+        assert run(plugin.rewrite_style_response(response="你好全世界", session_id="sess-1")) == {"action": "continue"}
 
     def test_rewrite_success(self, tmp_path: Path) -> None:
         plugin, store, llm = self.make_env(tmp_path)
         self.mount(store)
-        llm.set_responses([{"success": True, "response": "你好世界！"}])
-        result = run(plugin.rewrite_style_response(response="你好世界", session_id="sess-1"))
+        llm.set_responses([{"success": True, "response": "你好全世界呀"}])
+        result = run(plugin.rewrite_style_response(response="你好全世界", session_id="sess-1"))
         assert result["action"] == "continue"
-        assert result["modified_kwargs"]["response"] == "你好世界！"
+        assert result["modified_kwargs"]["response"] == "你好全世界呀"
 
     def test_rewrite_same_text_no_change(self, tmp_path: Path) -> None:
         plugin, store, llm = self.make_env(tmp_path)
         self.mount(store)
-        llm.set_responses([{"success": True, "response": "你好世界"}])
-        result = run(plugin.rewrite_style_response(response="你好世界", session_id="sess-1"))
+        llm.set_responses([{"success": True, "response": "你好全世界"}])
+        result = run(plugin.rewrite_style_response(response="你好全世界", session_id="sess-1"))
         assert "modified_kwargs" not in result
 
     def test_rewrite_failure_fallback(self, tmp_path: Path) -> None:
@@ -771,18 +771,18 @@ class TestRewriteHook:
         self.mount(store)
         llm.set_responses([{"success": False, "error": "boom"}])
         assert "modified_kwargs" not in run(
-            plugin.rewrite_style_response(response="你好世界", session_id="sess-1")
+            plugin.rewrite_style_response(response="你好全世界", session_id="sess-1")
         )
-        llm.set_responses([{"success": True, "response": "你"}])  # 长度比例 0.25 < 0.5，安全检查不过
+        llm.set_responses([{"success": True, "response": "你"}])  # 长度比例 0.2 < 0.5，安全检查不过
         assert "modified_kwargs" not in run(
-            plugin.rewrite_style_response(response="你好世界", session_id="sess-1")
+            plugin.rewrite_style_response(response="你好全世界", session_id="sess-1")
         )
 
     def test_rewrite_concurrent_guard(self, tmp_path: Path) -> None:
         plugin, store, _ = self.make_env(tmp_path)
         self.mount(store)
         plugin._rewriting.add("sess-1")
-        result = run(plugin.rewrite_style_response(response="你好世界", session_id="sess-1"))
+        result = run(plugin.rewrite_style_response(response="你好全世界", session_id="sess-1"))
         assert "modified_kwargs" not in result
 
     def test_rewriting_released_on_failure(self, tmp_path: Path) -> None:
@@ -795,7 +795,7 @@ class TestRewriteHook:
 
         plugin._rewrite_with_llm = boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError):
-            run(plugin.rewrite_style_response(response="你好世界", session_id="sess-1"))
+            run(plugin.rewrite_style_response(response="你好全世界", session_id="sess-1"))
         assert "sess-1" not in plugin._rewriting
 
     def test_rewrite_timeout_falls_back(self, tmp_path: Path) -> None:
@@ -809,12 +809,12 @@ class TestRewriteHook:
 
         async def slow_generate(messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
             await asyncio.sleep(10)
-            return {"success": True, "response": "你好世界！"}
+            return {"success": True, "response": "你好全世界呀"}
 
         plugin.ctx.llm.generate = slow_generate  # type: ignore[attr-defined]
         result = run(
             asyncio.wait_for(
-                plugin._rewrite_with_llm("参考文本", "你好世界"),
+                plugin._rewrite_with_llm("参考文本", "你好全世界"),
                 timeout=8,
             )
         )
@@ -831,13 +831,13 @@ class TestRewriteHook:
 
         async def slow_generate(messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
             await asyncio.sleep(10)
-            return {"success": True, "response": "你好世界！"}
+            return {"success": True, "response": "你好全世界呀"}
 
         plugin.ctx.llm.generate = slow_generate  # type: ignore[attr-defined]
         start = time.monotonic()
         result = run(
             asyncio.wait_for(
-                plugin.rewrite_style_response(response="你好世界", session_id="sess-1"),
+                plugin.rewrite_style_response(response="你好全世界", session_id="sess-1"),
                 timeout=8,
             )
         )
@@ -847,7 +847,7 @@ class TestRewriteHook:
 
 
 class TestAutoEnableModels:
-    """模型目录自动生效：放进目录的模型自动审核通过并对所有群全局生效，无需 /风格启用。"""
+    """目录模式和手动选择模式。"""
 
     def make_env(self, tmp_path: Path, auto_enable: bool = True) -> tuple[ChatStyleTranslatorPlugin, StyleStore]:
         store = StyleStore(tmp_path)
@@ -860,17 +860,50 @@ class TestAutoEnableModels:
         plugin._store = store
         return plugin, store
 
-    def test_auto_enable_approves_and_globals(self, tmp_path: Path) -> None:
+    def test_directory_includes_all_models_and_restores_manual_selection(self, tmp_path: Path) -> None:
         plugin, store = self.make_env(tmp_path, auto_enable=True)
+        pending = store.list_models()[0]["model_id"]
+        run(store.save_model({"model_id": "approved", "name": "通用模型", "status": "approved"}))
+        run(store.save_model({
+            "model_id": "scoped", "name": "本群模型", "status": "approved",
+            "group_id": "88880001", "group_only": True, "global_disabled": True,
+        }))
+        run(store.set_group_field("88880001", "active_models", ["scoped"]))
+        raw_config = {
+            "plugin": {"config_version": "0.20.18", "auto_enable_models": True},
+            "inject": {"global_models": ["approved"]},
+            "groups": {"items": [{"group_id": "88880001", "prefer_group_models": True}]},
+        }
+        plugin.set_plugin_config(raw_config)
+        plugin._sync_config()
         run(plugin._refresh_global_models())
-        model_id = store.list_models()[0]["model_id"]
-        file_id = store.find_model_file(model_id)
-        # 自动全局生效：模型文件进入全局列表，任意群都能解析到
-        assert file_id in plugin._global_models
-        assert plugin._resolve_active_models("88880001") == [file_id]
-        assert plugin._resolve_active_models("任意未绑定群") == [file_id]
-        # 自动审核通过：状态被改为 approved 并写回
-        assert store.get_model(file_id).get("status") == "approved"
+
+        assert plugin._global_models == []
+        for group in ("88880001", "任意未绑定群"):
+            assert set(plugin._resolve_active_models(group)) == {"approved", "scoped", pending}
+        assert store.get_model(pending)["status"] == "pending"
+        status = run(plugin.get_config_widget_state())["active_models"].text
+        assert "目录自动生效　3 个模型" in status
+        assert "群聊通用模型和群挂载暂时停用" in status
+        assert plugin._active_model_source("approved", "88880001") == "目录自动生效"
+
+        raw_config["plugin"]["auto_enable_models"] = False
+        plugin.set_plugin_config(raw_config)
+        plugin._sync_config()
+        run(plugin._refresh_global_models())
+        assert plugin._resolve_active_models("88880001") == ["scoped"]
+        assert plugin._resolve_active_models("任意未绑定群") == ["approved"]
+
+    def test_directory_updates_on_added_changed_and_deleted_models(self, tmp_path: Path) -> None:
+        plugin, store = self.make_env(tmp_path, auto_enable=True)
+        original = store.list_model_ids()[0]
+        path = store.model_dir / "imported.json"
+        path.write_text("invalid", encoding="utf-8")
+        assert plugin._resolve_active_models("88880001") == [original]
+        path.write_text('{"overall_style":"口语短句"}', encoding="utf-8")
+        assert set(plugin._resolve_active_models("88880001")) == {"imported", original}
+        path.unlink()
+        assert plugin._resolve_active_models("88880001") == [original]
 
     def test_disabled_keeps_pending_and_not_global(self, tmp_path: Path) -> None:
         plugin, store = self.make_env(tmp_path, auto_enable=False)
@@ -949,11 +982,6 @@ class TestPreRewriteBlacklist:
         assert plugin2._pre_rewrite_semantic_match is False
         assert plugin2._pre_rewrite_style == "无"
         assert plugin2._pre_rewrite_style_custom == ""
-        assert plugin2._rewrite_style == "无"
-        assert plugin2._rewrite_style_custom == ""
-        plugin3 = make_plugin(inject={"rewrite_style": "温柔", "rewrite_style_custom": "像东北老铁唠嗑"})
-        assert plugin3._rewrite_style == "温柔"
-        assert plugin3._rewrite_style_custom == "像东北老铁唠嗑"
 
     def test_style_guide_resolution(self) -> None:
         plugin = make_plugin(pre_rewrite_blacklist={"rewrite_style": "温柔"})
@@ -976,25 +1004,13 @@ class TestPreRewriteBlacklist:
         plugin5 = make_plugin(pre_rewrite_blacklist={"rewrite_style": "自定义", "rewrite_style_custom": "  "})
         assert plugin5._pre_rewrite_style_guide() == ""
 
-    def test_rewrite_style_guide_resolution(self) -> None:
-        """回复后微调「微调风格」：与删词补意风格同表解析；无/自定义留空 = 不注入。"""
-        plugin = make_plugin(inject={"rewrite_style": "温柔"})
-        assert "温柔" in plugin._rewrite_style_guide()
-        assert "网络梗词" in plugin._rewrite_style_guide()  # 温柔避免网络梗词
-        plugin3 = make_plugin(inject={"rewrite_style": "沉稳"})
-        assert "禁止网络梗词" in plugin3._rewrite_style_guide()  # 沉稳禁用网络梗词
-        plugin4 = make_plugin(inject={"rewrite_style": "自定义", "rewrite_style_custom": "像东北老铁唠嗑"})
-        assert "像东北老铁唠嗑" in plugin4._rewrite_style_guide()
-        plugin5 = make_plugin(inject={"rewrite_style": "自定义", "rewrite_style_custom": "  "})
-        assert plugin5._rewrite_style_guide() == ""
-
     def test_no_symbol_emotion_default_and_sync(self) -> None:
         """「不用符号表达情绪」开关默认开启，配置可关闭/打开。"""
         plugin = make_plugin()
         assert plugin._no_symbol_emotion is True  # 默认开启
-        off = make_plugin(plugin={"enabled": True, "config_version": "0.17.0", "no_symbol_emotion": False})
+        off = make_plugin(user_block={"no_symbol_emotion": False})
         assert off._no_symbol_emotion is False
-        on = make_plugin(plugin={"enabled": True, "config_version": "0.17.0", "no_symbol_emotion": True})
+        on = make_plugin(user_block={"no_symbol_emotion": True})
         assert on._no_symbol_emotion is True
 
     def test_rewrite_prompt_contains_no_symbol_rule(self, tmp_path: Path) -> None:
@@ -1018,7 +1034,7 @@ class TestPreRewriteBlacklist:
         """关闭「不用符号表达情绪」后，微调提示词不再注入该约束。"""
         plugin, _ = self.make_env(
             tmp_path,
-            plugin={"enabled": True, "config_version": "0.17.0", "no_symbol_emotion": False},
+            user_block={"no_symbol_emotion": False},
         )
         plugin._set_context(FakeCtx(tmp_path))
         plugin._rewrite_with_llm = ChatStyleTranslatorPlugin._rewrite_with_llm.__get__(  # type: ignore[method-assign]
@@ -1055,7 +1071,7 @@ class TestPreRewriteBlacklist:
         """关闭「不用符号表达情绪」后，删词补意提示词不再注入该约束。"""
         plugin, _ = self.make_env(
             tmp_path,
-            plugin={"enabled": True, "config_version": "0.17.0", "no_symbol_emotion": False},
+            user_block={"no_symbol_emotion": False},
             pre_rewrite_blacklist={"enabled": True, "semantic_match": True, "items": ["属实"]},
         )
         plugin._set_context(FakeCtx(tmp_path))
@@ -1083,14 +1099,15 @@ class TestPreRewriteBlacklist:
             response: str,
             original_response: str = "",
             forbidden_words: Optional[List[str]] = None,
+            *, incoming_text: str = "",
         ) -> Optional[str]:
             seen.append(response)
-            return "改好啦"
+            return "今晚一块儿吗"
 
         plugin._rewrite_with_llm = fake_rewrite  # type: ignore[method-assign]
         result = run(plugin.rewrite_style_response(response="今晚一起涩涩吗", session_id="sess-1"))
         assert seen == ["今晚一起吗"]
-        assert result["modified_kwargs"]["response"] == "改好啦"
+        assert result["modified_kwargs"]["response"] == "今晚一块儿吗"
 
     def test_failure_returns_cleaned(self, tmp_path: Path) -> None:
         """命中黑名单但微调失败：仍返回删词后的文本，黑名单词不出现。"""
@@ -1105,6 +1122,7 @@ class TestPreRewriteBlacklist:
             response: str,
             original_response: str = "",
             forbidden_words: Optional[List[str]] = None,
+            *, incoming_text: str = "",
         ) -> Optional[str]:
             return None
 
@@ -1125,6 +1143,7 @@ class TestPreRewriteBlacklist:
             response: str,
             original_response: str = "",
             forbidden_words: Optional[List[str]] = None,
+            *, incoming_text: str = "",
         ) -> Optional[str]:
             return None
 
@@ -1169,15 +1188,15 @@ class TestPreRewriteBlacklist:
         assert called == []  # 语义 LLM 未被调用
         assert "modified_kwargs" not in result  # 文本未被改动
 
-    def test_strip_to_empty_keeps_original(self, tmp_path: Path) -> None:
-        """删词后草稿为空：放弃微调并保留原回复。"""
+    def test_strip_to_empty_aborts_response(self, tmp_path: Path) -> None:
+        """删词后无内容可发，终止回复。"""
         plugin, store = self.make_env(
             tmp_path,
             pre_rewrite_blacklist={"enabled": True, "items": ["涩涩"]},
         )
         self.mount(store)
         result = run(plugin.rewrite_style_response(response="涩涩涩涩", session_id="sess-1"))
-        assert "modified_kwargs" not in result
+        assert result["action"] == "abort" and "黑名单过滤" in result["custom_result"]["reason"]
 
     def test_rewrite_success_with_hit(self, tmp_path: Path) -> None:
         """命中黑名单且微调成功：返回微调后的文本（安全检查以删词后草稿为基准）。"""
@@ -1192,12 +1211,13 @@ class TestPreRewriteBlacklist:
             response: str,
             original_response: str = "",
             forbidden_words: Optional[List[str]] = None,
+            *, incoming_text: str = "",
         ) -> Optional[str]:
-            return "今晚一起吗？"
+            return "今晚也一起吗？"
 
         plugin._rewrite_with_llm = fake_rewrite  # type: ignore[method-assign]
         result = run(plugin.rewrite_style_response(response="今晚一起涩涩吗", session_id="sess-1"))
-        assert result["modified_kwargs"]["response"] == "今晚一起吗？"
+        assert result["modified_kwargs"]["response"] == "今晚也一起吗？"
 
     def test_no_hit_unchanged(self, tmp_path: Path) -> None:
         """未命中黑名单时按原逻辑微调。"""
@@ -1212,12 +1232,13 @@ class TestPreRewriteBlacklist:
             response: str,
             original_response: str = "",
             forbidden_words: Optional[List[str]] = None,
+            *, incoming_text: str = "",
         ) -> Optional[str]:
-            return "你好世界！"
+            return "你好全世界呀"
 
         plugin._rewrite_with_llm = fake_rewrite  # type: ignore[method-assign]
-        result = run(plugin.rewrite_style_response(response="你好世界", session_id="sess-1"))
-        assert result["modified_kwargs"]["response"] == "你好世界！"
+        result = run(plugin.rewrite_style_response(response="你好全世界", session_id="sess-1"))
+        assert result["modified_kwargs"]["response"] == "你好全世界呀"
 
 
 class TestPreRewriteSemanticMatch:
@@ -1436,116 +1457,73 @@ class TestPreRewriteSemanticMatch:
         assert called == []
 
     def test_hook_semantic_hit_skips_rewrite(self, tmp_path: Path) -> None:
-        """hook 集成：字面未命中 → 语义删除生效后直接返回删词补意结果，跳过回复后风格微调。"""
         plugin, store = self.make_env(
             tmp_path,
             pre_rewrite_blacklist={"enabled": True, "semantic_match": True, "items": ["骂人"]},
         )
         self.mount(store)
+        calls: List[str] = []
 
         async def fake_generate(messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
-            return {"success": True, "response": "今晚一起吗"}
+            calls.append(messages[1]["content"])
+            return {"success": True, "response": "[[SEMANTIC_BLACKLIST]]\n今晚一起吗"}
 
-        plugin.ctx.llm.generate = fake_generate  # type: ignore[attr-defined]
-        called: List[bool] = []
-
-        async def fake_rewrite(
-            reference: str,
-            response: str,
-            original_response: str = "",
-            forbidden_words: Optional[List[str]] = None,
-        ) -> Optional[str]:
-            called.append(True)
-            return "改好啦"
-
-        plugin._rewrite_with_llm = fake_rewrite  # type: ignore[method-assign]
+        plugin.ctx.llm.generate = fake_generate
         result = run(plugin.rewrite_style_response(response="今晚一起嘴臭一下吗", session_id="sess-1"))
-        assert called == []  # 语义换词匹配生效 → 不再调用回复后微调
+        assert len(calls) == 1 and "语义黑名单词条" in calls[0] and "群聊风格资料" in calls[0]
         assert result["modified_kwargs"]["response"] == "今晚一起吗"
+        assert plugin._last_rewrite_trace["reason"] == "已处理语义黑名单"
 
-    def test_hook_literal_hit_keep_meaning_skips_rewrite(self, tmp_path: Path) -> None:
-        """hook 集成（用户示例）：字面命中「属实」→ 语义补「是」保持原意 → 直接返回，不再叠加风格微调。"""
+    def test_hook_literal_hit_keeps_meaning_without_second_call(self, tmp_path: Path) -> None:
         plugin, store = self.make_env(
             tmp_path,
             pre_rewrite_blacklist={"enabled": True, "semantic_match": True, "items": ["属实"]},
         )
         self.mount(store)
+        calls: List[str] = []
 
         async def fake_generate(messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
-            return {"success": True, "response": "这波是躺赢进世界赛了啊"}
+            calls.append(messages[1]["content"])
+            return {"success": True, "response": "[[SEMANTIC_BLACKLIST]]\n这波是躺赢进世界赛了啊"}
 
-        plugin.ctx.llm.generate = fake_generate  # type: ignore[attr-defined]
-        called: List[bool] = []
-
-        async def fake_rewrite(
-            reference: str,
-            response: str,
-            original_response: str = "",
-            forbidden_words: Optional[List[str]] = None,
-        ) -> Optional[str]:
-            called.append(True)
-            return None
-
-        plugin._rewrite_with_llm = fake_rewrite  # type: ignore[method-assign]
+        plugin.ctx.llm.generate = fake_generate
         result = run(plugin.rewrite_style_response(response="这波属实躺赢进世界赛了啊", session_id="sess-1"))
-        assert called == []  # 语义换词匹配生效 → 不再调用回复后微调
         assert result["modified_kwargs"]["response"] == "这波是躺赢进世界赛了啊"
+        assert len(calls) == 1 and "删除前的原句" in calls[0]
 
-    def test_hook_semantic_fallback_to_literal_still_rewrites(self, tmp_path: Path) -> None:
-        """语义删除失败退回字面结果（只有字面删词命中）：仍继续回复后微调。"""
+    def test_hook_failed_request_returns_literal_filter_without_retry(self, tmp_path: Path) -> None:
         plugin, store = self.make_env(
             tmp_path,
             pre_rewrite_blacklist={"enabled": True, "semantic_match": True, "items": ["属实"]},
         )
         self.mount(store)
+        calls: List[str] = []
 
         async def fake_generate(messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
-            return {"success": False}  # 语义删除失败 → 退回字面删除结果
+            calls.append(messages[1]["content"])
+            return {"success": False}
 
-        plugin.ctx.llm.generate = fake_generate  # type: ignore[attr-defined]
-        seen: List[str] = []
-
-        async def fake_rewrite(
-            reference: str,
-            response: str,
-            original_response: str = "",
-            forbidden_words: Optional[List[str]] = None,
-        ) -> Optional[str]:
-            seen.append(response)
-            return "这波躺赢进世界赛了啊！"
-
-        plugin._rewrite_with_llm = fake_rewrite  # type: ignore[method-assign]
+        plugin.ctx.llm.generate = fake_generate
         result = run(plugin.rewrite_style_response(response="这波属实躺赢进世界赛了啊", session_id="sess-1"))
-        assert seen == ["这波躺赢进世界赛了啊"]  # 仅字面删词命中 → 仍走回复后微调
-        assert result["modified_kwargs"]["response"] == "这波躺赢进世界赛了啊！"
+        assert result["modified_kwargs"]["response"] == "这波躺赢进世界赛了啊"
+        assert len(calls) == 1
 
-    def test_hook_semantic_no_change_still_rewrites(self, tmp_path: Path) -> None:
-        """语义删除返回未改动原句（未命中同义表述）：只有字面删词命中时仍继续回复后微调。"""
+    def test_hook_only_literal_hit_can_still_rewrite_with_one_call(self, tmp_path: Path) -> None:
         plugin, store = self.make_env(
             tmp_path,
             pre_rewrite_blacklist={"enabled": True, "semantic_match": True, "items": ["涩涩"]},
         )
         self.mount(store)
+        calls: List[str] = []
 
         async def fake_generate(messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
-            return {"success": True, "response": "今晚一起吗"}  # 与字面删除结果一致 → 视为语义未生效
+            calls.append(messages[1]["content"])
+            return {"success": True, "response": "今晚一块儿吗"}
 
-        plugin.ctx.llm.generate = fake_generate  # type: ignore[attr-defined]
-        seen: List[str] = []
-
-        async def fake_rewrite(
-            reference: str,
-            response: str,
-            original_response: str = "",
-            forbidden_words: Optional[List[str]] = None,
-        ) -> Optional[str]:
-            seen.append(response)
-            return "改好啦"
-
-        plugin._rewrite_with_llm = fake_rewrite  # type: ignore[method-assign]
+        plugin.ctx.llm.generate = fake_generate
         result = run(plugin.rewrite_style_response(response="今晚一起涩涩吗", session_id="sess-1"))
-        assert seen == ["今晚一起吗"]  # 语义未实际生效 → 仍走回复后微调
-        assert result["modified_kwargs"]["response"] == "改好啦"
+        assert result["modified_kwargs"]["response"] == "今晚一块儿吗"
+        assert len(calls) == 1 and "涩涩" in calls[0]
 
     def test_hook_rewrite_output_rescans_blacklist(self, tmp_path: Path) -> None:
         """微调结果仍含黑名单词（LLM 恢复原句用词）：兜底再删一次。"""
@@ -1560,6 +1538,7 @@ class TestPreRewriteSemanticMatch:
             response: str,
             original_response: str = "",
             forbidden_words: Optional[List[str]] = None,
+            *, incoming_text: str = "",
         ) -> Optional[str]:
             return "今晚一起涩涩吧！"  # LLM 把黑名单词写回来了
 
@@ -1680,12 +1659,13 @@ class TestLifecycle:
         plugin._last_manual_trigger_at = 0.0
         triggered: List[str] = []
 
-        async def fake_trigger(group_id: str, reason: str) -> None:
+        async def fake_trigger(group_id: str, reason: str, *, force: bool = False) -> None:
+            assert force
             triggered.append(group_id)
 
         plugin._trigger_auto_analyze = fake_trigger  # type: ignore[method-assign]
         run(plugin._maybe_manual_analyze_trigger())
-        assert sorted(triggered) == ["88880002", "88880001"]
+        assert sorted(triggered) == ["88880001", "88880002"]
 
         # 30 秒防抖：连续再次触发不重复
         plugin._last_manual_trigger_at = time.time()
@@ -1997,7 +1977,7 @@ class TestHistoryBackfill:
         run(store.bind_group("88880002", group_name="群B"))
         plugin = make_plugin(owner={"qq": ["123456789"]}, collection=self.collection_config())
         plugin._store = store
-        private_message = {"message_info": {"group_info": {}, "user_info": {"user_id": "123456789"}}}
+        private_message = {"platform": "qq", "message_info": {"group_info": {}, "user_info": {"user_id": "123456789"}}}
         triggered: List[str] = []
 
         async def fake_analysis(group_id: str, reason: str = "", notify: bool = False) -> str:
@@ -2009,7 +1989,7 @@ class TestHistoryBackfill:
             "user_id": "123456789", "message": private_message, "matched_groups": {},
         }))
         assert ok and "已开始对 2 个绑定群" in text
-        assert sorted(triggered) == ["88880002", "88880001"]
+        assert sorted(triggered) == ["88880001", "88880002"]
 
         plugin2 = make_plugin(owner={"qq": ["123456789"]}, collection=self.collection_config())
         plugin2._store = StyleStore(tmp_path / "empty")
@@ -2034,4 +2014,4 @@ class TestHistoryBackfill:
             "user_id": "123456789", "message": private_message, "matched_groups": {},
         }))
         assert ok and "已开始对 2 个绑定群" in text
-        assert sorted(backfilled) == ["88880002", "88880001"]
+        assert sorted(backfilled) == ["88880001", "88880002"]

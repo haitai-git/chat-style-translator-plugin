@@ -79,7 +79,9 @@ class TestMergePrompt:
         assert "来源A:来源B = 70:30" in prompt
         assert "激进精简" in prompt
         assert "不超过 120 条" in prompt
-        assert "不超过 20 条最有代表性的语句" in prompt
+        assert "每个场景最终保留不超过" not in prompt
+        analysis = analyzer._merge_system_prompt({"analysis_scene_limit": True})
+        assert "不超过 20 条最有代表性的语句" in analysis
         std = analyzer._merge_system_prompt(None)
         assert "来源A:来源B" not in std and "激进精简" not in std and "不超过 120 条" not in std
         assert "语句要去重：完全重复或含义高度相似的语句只保留一条" in std

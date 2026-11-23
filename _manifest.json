@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "0.20.0",
+  "version": "1.0.1",
   "name": "聊天风格转译",
   "description": "绑定 QQ 群后自动收集群友对话（也可用 /风格拉取历史 从 NapCat 直接回填历史消息），在后台用 LLM 分析群聊场景、说话对象与每位群友的聊天风格，生成可审核、可融合、可编辑的风格模型；通过黑名单语义过滤剔除不合语境的语句；审核通过后，AI 自身行为风格保持不变，每次生成回复草稿后检索该群风格并做轻度微调（只改几个词，原意严格不变）。内置回复乱码拦截：AI 回复出现乱码、指令残片或内部标识符泄漏时自动要求回复器重新生成。内置微调前黑名单：回复草稿中出现黑名单词（仅支持中文词条）时，先在风格微调前删除（可开启语义换词匹配，基于没删前的整句理解意思、补字保持原意；语义换词匹配生效时直接返回删词补意结果、不再叠加回复后风格微调，仅字面删词命中时仍继续回复后微调）。",
   "author": {
@@ -15,12 +15,12 @@
     "issues": "https://github.com/haitai-git/chat-style-translator-plugin/issues"
   },
   "host_application": {
-    "min_version": "1.0.0",
-    "max_version": "1.99.99"
+    "min_version": "1.4.8",
+    "max_version": "1.4.8"
   },
   "sdk": {
-    "min_version": "2.7.1",
-    "max_version": "2.99.99"
+    "min_version": "2.23.0",
+    "max_version": "2.23.0"
   },
   "dependencies": [],
   "capabilities": [
